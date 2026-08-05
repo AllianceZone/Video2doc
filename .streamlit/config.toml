@@ -1,0 +1,10 @@
+[server]
+# Max size (MB) for uploaded files (video + transcript). Default is 200MB — raised
+# here to comfortably fit videos up to ~2GB. Increase further if you need to.
+maxUploadSize = 2200
+
+# Matches maxUploadSize so large-file websocket messages aren't rejected either.
+maxMessageSize = 2200
+
+[browser]
+gatherUsageStats = false

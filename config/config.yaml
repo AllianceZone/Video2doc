@@ -1,0 +1,112 @@
+# ============================================================
+# video2doc configuration
+# Edit this file to control every stage of the pipeline.
+# ============================================================
+
+input:
+  # One of: youtube | local | local_folder | gdrive | zoho
+  # "local_folder" batch-processes every video file found directly inside the
+  # given folder, producing a separate output/<video_name>/ for each.
+  source_type: "youtube"
+
+  # YouTube URL, local file path, or Drive share link, depending on source_type above
+  source: "https://www.youtube.com/watch?v=S_oN3vlzpMw"
+
+  # Preferred max resolution for YouTube downloads (e.g. 1080p, 720p, best)
+  video_quality: "1080p"
+
+frame_extraction:
+  # Mode: "fixed" (interval only) | "scene" (scene-change only) | "hybrid" (both, recommended)
+  mode: "hybrid"
+
+  # Fixed sampling interval in seconds (used in "fixed" and "hybrid" modes)
+  interval_seconds: 5
+
+  # Scene-change sensitivity for PySceneDetect's ContentDetector.
+  # Lower = more sensitive (more scenes detected). Typical range: 15-40.
+  scene_threshold: 27.0
+
+  # Image output settings
+  image_format: "jpg"          # jpg | png
+  jpg_quality: 95              # 1-100, only used for jpg
+
+dedup:
+  enabled: true
+
+  # Perceptual-hash Hamming distance below which two frames are considered
+  # near-duplicates. 0 = identical, ~5 = very similar, ~10+ = loosely similar.
+  hamming_threshold: 5
+
+  # Drop frames that are too blurry (e.g. mid-transition/motion blur) using
+  # variance-of-Laplacian. Higher threshold = stricter (rejects more frames).
+  blur_check: true
+  blur_threshold: 60.0
+
+  # Drop frames that are near-blank/black (e.g. fade transitions)
+  blank_check: true
+  blank_std_threshold: 8.0
+
+transcription:
+  # Engine: "local" (faster-whisper) | "api" (OpenAI Whisper API) | "external" (bring your own file)
+  #
+  # Use "external" if you already have a transcript (e.g. exported from YouTube,
+  # Otter.ai, Zoom, etc). Put the file in the `input_transcripts/` folder (created
+  # next to main.py) and set external_transcript_filename below to its filename.
+  # Supported formats: .json (whisper-style segments, or a list of
+  # {"start":.., "end":.., "text":..}), .srt, .vtt, or .txt with lines like
+  # "[00:01:23] some text" (one segment per line).
+  engine: "local"
+
+  # Only used when engine: "external"
+  external_transcript_dir: "input_transcripts"
+  external_transcript_filename: "my_transcript.srt"
+
+  # Used when engine = "local". Options: tiny, base, small, medium, large-v2, large-v3
+  # Bigger = more accurate but slower / more RAM or VRAM.
+  local_model: "medium"
+
+  # Device for local model: "cpu", "cuda", or "auto"
+  local_device: "auto"
+  local_compute_type: "auto"   # e.g. int8, float16, float32, auto
+
+  # Used when engine = "api". Reads the key from this environment variable.
+  api_key_env: "OPENAI_API_KEY"
+  api_model: "whisper-1"
+
+  # Language hint, e.g. "en". Leave empty string for auto-detect.
+  language: "en"
+
+summarization:
+  enabled: true
+
+  # Method: "auto" (use OpenAI if a key is available, else local) | "local" | "openai"
+  method: "auto"
+
+  # Local mode: TextRank-style extractive summarization (no internet/API needed)
+  max_summary_sentences: 5
+  max_key_points: 8
+
+  # OpenAI mode (better quality, needs API key + internet)
+  openai_model: "gpt-4o-mini"
+  api_key_env: "OPENAI_API_KEY"
+
+output:
+  base_dir: "output"
+  generate_docx: true
+  generate_pptx: true
+  docx_filename: "video_report.docx"
+  pptx_filename: "video_report.pptx"
+  image_width_inches: 6.0
+
+  # Keep the raw (pre-dedup) frames folder too, for debugging/reference
+  keep_raw_frames: true
+
+pipeline:
+  # If true, skip stages whose output already exists in the project's output
+  # folder (e.g. re-running after an interruption won't re-download the video
+  # or redo frame extraction/transcription that already finished). Delete the
+  # relevant output subfolder/file to force that stage to redo.
+  resume: true
+
+logging:
+  level: "INFO"   # DEBUG | INFO | WARNING | ERROR

@@ -1,0 +1,32 @@
+# Core
+PyYAML>=6.0
+tqdm>=4.66
+
+# Video download
+yt-dlp>=2024.8.6
+gdown>=5.2.0
+requests>=2.31
+
+# Frame extraction / image processing
+opencv-python>=4.9.0.80
+Pillow>=10.3.0
+scenedetect[opencv]>=0.6.4
+imagehash>=4.3.1
+numpy>=1.26
+
+# Transcription
+faster-whisper>=1.0.3
+openai>=1.35.0
+
+# Word document generation
+python-docx>=1.1.2
+
+# PowerPoint generation
+python-pptx>=1.0.2
+
+# Summarization (local extractive fallback)
+scikit-learn>=1.4.0
+networkx>=3.2
+
+# UI
+streamlit>=1.37.0

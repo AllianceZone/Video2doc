@@ -1,0 +1,3 @@
+Drop your externally-supplied transcript file here (e.g. my_transcript.srt),
+then set transcription.engine: "external" and
+transcription.external_transcript_filename in config/config.yaml to match.
