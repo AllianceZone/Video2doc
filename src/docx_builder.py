@@ -47,6 +47,55 @@ def compute_frame_text_map(frame_paths: List[Path], segments: List[Dict]) -> Dic
     return mapping
 
 
+def build_audio_document(segments: List[Dict], video_title: str, output_path: Path,
+                          summary: str = "", key_points: Optional[List[str]] = None,
+                          transcript_text_override: Optional[str] = None) -> Path:
+    """
+    For audio-only input (no video/frames): title, summary, key points, then the
+    full transcript as timestamped paragraphs.
+    """
+    doc = Document()
+
+    title = doc.add_heading(video_title, level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle = doc.add_paragraph("Auto-generated audio transcript report")
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    if summary:
+        doc.add_heading("Summary", level=1)
+        doc.add_paragraph(summary)
+
+    if key_points:
+        doc.add_heading("Key Points", level=1)
+        for kp in key_points:
+            doc.add_paragraph(kp, style="List Bullet")
+
+    doc.add_page_break()
+    doc.add_heading("Full Transcript", level=1)
+
+    if transcript_text_override is not None:
+        for line in transcript_text_override.splitlines():
+            line = line.strip()
+            if line:
+                p = doc.add_paragraph(line)
+                p.paragraph_format.space_after = Pt(8)
+    else:
+        for seg in segments:
+            text = seg["text"].strip()
+            if not text:
+                continue
+            p = doc.add_paragraph()
+            run_ts = p.add_run(f"[{seconds_to_hhmmss(seg['start'])}]  ")
+            run_ts.bold = True
+            p.add_run(text)
+            p.paragraph_format.space_after = Pt(8)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(output_path))
+    logger.info(f"Saved audio transcript Word document: {output_path}")
+    return output_path
+
+
 def build_document(frame_paths: List[Path], segments: List[Dict], video_title: str,
                     output_path: Path, image_width_inches: float = 6.0,
                     text_overrides: Optional[Dict[str, str]] = None,

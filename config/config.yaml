@@ -5,8 +5,13 @@
 
 input:
   # One of: youtube | local | local_folder | gdrive | zoho
-  # "local_folder" batch-processes every video file found directly inside the
-  # given folder, producing a separate output/<video_name>/ for each.
+  # "local_folder" batch-processes every video/audio file found directly inside
+  # the given folder, producing a separate output/<name>/ for each.
+  #
+  # Audio-only files (.mp3, .wav, .m4a, .flac, .ogg, .aac, .wma, .opus) are
+  # auto-detected by extension for "local"/"local_folder" sources -- frame
+  # extraction and dedup are skipped automatically, and you get a transcript +
+  # summary Word doc / PowerPoint deck instead of frame-paired ones.
   source_type: "youtube"
 
   # YouTube URL, local file path, or Drive share link, depending on source_type above

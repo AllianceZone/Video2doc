@@ -158,6 +158,21 @@ Controlled by `summarization` in the config (or the sidebar in the UI):
 Both the Word doc and PPTX get a Summary section/slide and a Key Points
 section/slide up front, in addition to the per-frame pairing.
 
+## Audio-only input (mp3/wav/etc., no video)
+
+Upload or point at an audio file instead of a video — `.mp3`, `.wav`, `.m4a`,
+`.flac`, `.ogg`, `.aac`, `.wma`, `.opus` are all recognized automatically by
+extension. Frame extraction and deduplication are skipped entirely (there's no
+video to pull frames from); you still get local Whisper / OpenAI API /
+bring-your-own transcription, a summary + key points, and a Word doc +
+PowerPoint deck — just built around the full transcript instead of
+frame-by-frame pairing.
+
+- **Streamlit UI:** choose "Upload audio only (mp3/wav/etc.)" as the input source.
+- **CLI:** point `input.source` at an audio file (or a folder containing a mix
+  of video and audio files, with `source_type: "local_folder"`) — the type is
+  auto-detected per file.
+
 ## Tuning tips
 
 - **Too many near-duplicate frames kept?** Lower `dedup.hamming_threshold`

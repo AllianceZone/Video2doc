@@ -20,7 +20,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.utils import setup_logging, slugify, ensure_dir
+from src.utils import setup_logging, slugify, ensure_dir, is_audio_file
 from src.downloader import resolve_video
 from src.frame_extractor import extract_frames, get_video_duration
 from src.dedup import deduplicate_frames
@@ -28,10 +28,12 @@ from src.transcriber import transcribe, save_transcript_files
 from src.transcript_parser import load_external_transcript
 from src.text_utils import merge_into_sentences
 from src.summarizer import generate_summary
-from src.docx_builder import build_document
-from src.pptx_builder import build_pptx
+from src.docx_builder import build_document, build_audio_document
+from src.pptx_builder import build_pptx, build_audio_pptx
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".opus"}
+MEDIA_EXTENSIONS = VIDEO_EXTENSIONS | AUDIO_EXTENSIONS
 
 
 def load_config(path: Path) -> dict:
@@ -40,42 +42,50 @@ def load_config(path: Path) -> dict:
 
 
 def process_one_video(video_path: Path, cfg: dict, base_out: Path, logger) -> dict:
-    """Runs the full pipeline for a single already-resolved video file."""
+    """Runs the full pipeline for a single already-resolved video OR audio file."""
     resume = cfg.get("pipeline", {}).get("resume", True)
+    audio_only = is_audio_file(video_path)
 
     video_title = slugify(video_path.stem)
     project_dir = ensure_dir(base_out / video_title)
-    logger.info(f"Project output directory: {project_dir}")
+    logger.info(f"Project output directory: {project_dir}"
+                + (" (audio-only input)" if audio_only else ""))
 
-    # ---- Extract frames ----
-    fe_cfg = cfg["frame_extraction"]
-    raw_frames_dir = ensure_dir(project_dir / "frames_raw")
-    if resume and any(raw_frames_dir.iterdir()):
-        logger.info("Resume: raw frames already exist, skipping extraction.")
-        raw_frames = sorted(raw_frames_dir.glob(f"*.{fe_cfg['image_format']}"))
+    kept_frames = []
+    dedup_frames_dir = None
+
+    if not audio_only:
+        # ---- Extract frames ----
+        fe_cfg = cfg["frame_extraction"]
+        raw_frames_dir = ensure_dir(project_dir / "frames_raw")
+        if resume and any(raw_frames_dir.iterdir()):
+            logger.info("Resume: raw frames already exist, skipping extraction.")
+            raw_frames = sorted(raw_frames_dir.glob(f"*.{fe_cfg['image_format']}"))
+        else:
+            raw_frames = extract_frames(
+                video_path=video_path, output_dir=raw_frames_dir, mode=fe_cfg["mode"],
+                interval_seconds=fe_cfg["interval_seconds"], scene_threshold=fe_cfg["scene_threshold"],
+                image_format=fe_cfg["image_format"], jpg_quality=fe_cfg["jpg_quality"],
+            )
+
+        # ---- Deduplicate ----
+        dd_cfg = cfg["dedup"]
+        dedup_frames_dir = ensure_dir(project_dir / "frames_deduped")
+        if resume and any(dedup_frames_dir.iterdir()):
+            logger.info("Resume: deduped frames already exist, skipping dedup.")
+            kept_frames = sorted(dedup_frames_dir.glob(f"*.{fe_cfg['image_format']}"))
+        else:
+            kept_frames = deduplicate_frames(
+                frame_paths=raw_frames, dedup_dir=dedup_frames_dir, enabled=dd_cfg["enabled"],
+                hamming_threshold=dd_cfg["hamming_threshold"], blur_check=dd_cfg["blur_check"],
+                blur_threshold=dd_cfg["blur_threshold"], blank_check=dd_cfg["blank_check"],
+                blank_std_threshold=dd_cfg["blank_std_threshold"],
+            )
+
+        if not cfg["output"].get("keep_raw_frames", True):
+            shutil.rmtree(raw_frames_dir, ignore_errors=True)
     else:
-        raw_frames = extract_frames(
-            video_path=video_path, output_dir=raw_frames_dir, mode=fe_cfg["mode"],
-            interval_seconds=fe_cfg["interval_seconds"], scene_threshold=fe_cfg["scene_threshold"],
-            image_format=fe_cfg["image_format"], jpg_quality=fe_cfg["jpg_quality"],
-        )
-
-    # ---- Deduplicate ----
-    dd_cfg = cfg["dedup"]
-    dedup_frames_dir = ensure_dir(project_dir / "frames_deduped")
-    if resume and any(dedup_frames_dir.iterdir()):
-        logger.info("Resume: deduped frames already exist, skipping dedup.")
-        kept_frames = sorted(dedup_frames_dir.glob(f"*.{fe_cfg['image_format']}"))
-    else:
-        kept_frames = deduplicate_frames(
-            frame_paths=raw_frames, dedup_dir=dedup_frames_dir, enabled=dd_cfg["enabled"],
-            hamming_threshold=dd_cfg["hamming_threshold"], blur_check=dd_cfg["blur_check"],
-            blur_threshold=dd_cfg["blur_threshold"], blank_check=dd_cfg["blank_check"],
-            blank_std_threshold=dd_cfg["blank_std_threshold"],
-        )
-
-    if not cfg["output"].get("keep_raw_frames", True):
-        shutil.rmtree(raw_frames_dir, ignore_errors=True)
+        logger.info("Audio-only input detected -- skipping frame extraction/dedup.")
 
     # ---- Transcribe (or load external transcript) ----
     tr_cfg = cfg["transcription"]
@@ -130,23 +140,37 @@ def process_one_video(video_path: Path, cfg: dict, base_out: Path, logger) -> di
 
     if out_cfg.get("generate_docx", True):
         docx_path = project_dir / out_cfg["docx_filename"]
-        build_document(
-            frame_paths=kept_frames, segments=merged_segments, video_title=video_title,
-            output_path=docx_path, image_width_inches=out_cfg["image_width_inches"],
-        )
+        if audio_only:
+            build_audio_document(
+                segments=merged_segments, video_title=video_title, output_path=docx_path,
+                summary=summary, key_points=key_points,
+            )
+        else:
+            build_document(
+                frame_paths=kept_frames, segments=merged_segments, video_title=video_title,
+                output_path=docx_path, image_width_inches=out_cfg["image_width_inches"],
+                summary=summary, key_points=key_points,
+            )
         results["docx_path"] = docx_path
 
     if out_cfg.get("generate_pptx", True):
         pptx_path = project_dir / out_cfg["pptx_filename"]
-        build_pptx(
-            frame_paths=kept_frames, segments=merged_segments, video_title=video_title,
-            output_path=pptx_path, summary=summary, key_points=key_points,
-        )
+        if audio_only:
+            build_audio_pptx(
+                segments=merged_segments, video_title=video_title, output_path=pptx_path,
+                summary=summary, key_points=key_points,
+            )
+        else:
+            build_pptx(
+                frame_paths=kept_frames, segments=merged_segments, video_title=video_title,
+                output_path=pptx_path, summary=summary, key_points=key_points,
+            )
         results["pptx_path"] = pptx_path
 
     logger.info("=" * 60)
     logger.info(f"DONE: {video_title}")
-    logger.info(f"  Frames (deduped): {dedup_frames_dir}  ({len(kept_frames)} frames)")
+    if not audio_only:
+        logger.info(f"  Frames (deduped): {dedup_frames_dir}  ({len(kept_frames)} frames)")
     logger.info(f"  Transcript:       {transcript_dir}")
     if "docx_path" in results:
         logger.info(f"  Word document:    {results['docx_path']}")
@@ -170,11 +194,11 @@ def main():
 
     if in_cfg["source_type"] == "local_folder":
         folder = Path(in_cfg["source"]).expanduser().resolve()
-        videos = sorted(p for p in folder.iterdir() if p.suffix.lower() in VIDEO_EXTENSIONS)
+        videos = sorted(p for p in folder.iterdir() if p.suffix.lower() in MEDIA_EXTENSIONS)
         if not videos:
-            logger.error(f"No video files found in {folder}")
+            logger.error(f"No video/audio files found in {folder}")
             return
-        logger.info(f"Batch mode: found {len(videos)} video(s) in {folder}")
+        logger.info(f"Batch mode: found {len(videos)} file(s) in {folder}")
         for i, video_path in enumerate(videos, 1):
             logger.info(f"--- [{i}/{len(videos)}] {video_path.name} ---")
             try:

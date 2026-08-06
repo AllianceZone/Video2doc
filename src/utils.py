@@ -43,6 +43,13 @@ def slugify(name: str) -> str:
     return name.strip().replace(" ", "_")[:120] or "video"
 
 
+AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".opus"}
+
+
+def is_audio_file(path: Path) -> bool:
+    return path.suffix.lower() in AUDIO_EXTENSIONS
+
+
 def ensure_dir(path: Path) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     return path

@@ -17,7 +17,7 @@ import streamlit as st
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from src.utils import setup_logging, slugify, ensure_dir
+from src.utils import setup_logging, slugify, ensure_dir, is_audio_file, seconds_to_hhmmss
 from src.downloader import resolve_video
 from src.frame_extractor import extract_frames, get_video_duration
 from src.dedup import deduplicate_frames
@@ -25,8 +25,8 @@ from src.transcriber import transcribe, save_transcript_files
 from src.transcript_parser import load_external_transcript
 from src.text_utils import merge_into_sentences
 from src.summarizer import generate_summary
-from src.docx_builder import build_document, compute_frame_text_map
-from src.pptx_builder import build_pptx
+from src.docx_builder import build_document, build_audio_document, compute_frame_text_map
+from src.pptx_builder import build_pptx, build_audio_pptx
 
 st.set_page_config(page_title="video2doc", page_icon="🎬", layout="wide")
 setup_logging("INFO")
@@ -171,19 +171,29 @@ if st.session_state.stage == "setup":
 
     source_type_label = st.radio(
         "Where is your video?",
-        ["Upload a file", "YouTube URL", "Local file path", "Google Drive link", "Zoho WorkDrive link"],
+        ["Upload a file", "YouTube URL", "Local file path", "Google Drive link", "Zoho WorkDrive link",
+         "Upload audio only (mp3/wav/etc.)"],
         horizontal=True,
     )
 
     uploaded_video = None
     video_source_value = ""
     resolved_source_type = "local"
+    is_audio_upload = False
 
     if source_type_label == "Upload a file":
         uploaded_video = st.file_uploader(
             "Upload a video file", type=["mp4", "mov", "mkv", "avi", "webm"],
             help="Supports files up to ~2GB.")
         resolved_source_type = "local"
+    elif source_type_label == "Upload audio only (mp3/wav/etc.)":
+        uploaded_video = st.file_uploader(
+            "Upload an audio file", type=["mp3", "wav", "m4a", "flac", "ogg", "aac", "wma", "opus"],
+            help="No video/frames -- just a transcript + summary document. Supports files up to ~2GB.")
+        resolved_source_type = "local"
+        is_audio_upload = True
+        st.caption("🎧 Audio-only mode: frame extraction & dedup are skipped. "
+                   "You'll get a transcript + summary Word doc and PowerPoint deck.")
     elif source_type_label == "YouTube URL":
         video_source_value = st.text_input("YouTube URL", placeholder="https://www.youtube.com/watch?v=...")
         resolved_source_type = "youtube"
@@ -230,25 +240,30 @@ if st.session_state.stage == "setup":
                 status.write(f"✅ Video ready: `{video_path.name}`")
                 video_title = slugify(video_path.stem)
                 project_dir = ensure_dir(BASE_OUT / video_title)
+                audio_only = is_audio_file(video_path)
 
-                status.write("Extracting frames...")
-                raw_frames_dir = ensure_dir(project_dir / "frames_raw")
-                raw_frames = extract_frames(
-                    video_path=video_path, output_dir=raw_frames_dir, mode=frame_mode,
-                    interval_seconds=interval_seconds, scene_threshold=scene_threshold,
-                    image_format=image_format, jpg_quality=jpg_quality,
-                )
-                status.write(f"✅ Extracted {len(raw_frames)} raw frames")
+                kept_frames = []
+                if audio_only:
+                    status.write("🎧 Audio-only input detected — skipping frame extraction & dedup.")
+                else:
+                    status.write("Extracting frames...")
+                    raw_frames_dir = ensure_dir(project_dir / "frames_raw")
+                    raw_frames = extract_frames(
+                        video_path=video_path, output_dir=raw_frames_dir, mode=frame_mode,
+                        interval_seconds=interval_seconds, scene_threshold=scene_threshold,
+                        image_format=image_format, jpg_quality=jpg_quality,
+                    )
+                    status.write(f"✅ Extracted {len(raw_frames)} raw frames")
 
-                status.write("Deduplicating frames...")
-                dedup_frames_dir = ensure_dir(project_dir / "frames_deduped")
-                kept_frames = deduplicate_frames(
-                    frame_paths=raw_frames, dedup_dir=dedup_frames_dir, enabled=dedup_enabled,
-                    hamming_threshold=hamming_threshold, blur_check=blur_check,
-                    blur_threshold=blur_threshold, blank_check=blank_check,
-                    blank_std_threshold=blank_std_threshold,
-                )
-                status.write(f"✅ Kept {len(kept_frames)} frames after dedup")
+                    status.write("Deduplicating frames...")
+                    dedup_frames_dir = ensure_dir(project_dir / "frames_deduped")
+                    kept_frames = deduplicate_frames(
+                        frame_paths=raw_frames, dedup_dir=dedup_frames_dir, enabled=dedup_enabled,
+                        hamming_threshold=hamming_threshold, blur_check=blur_check,
+                        blur_threshold=blur_threshold, blank_check=blank_check,
+                        blank_std_threshold=blank_std_threshold,
+                    )
+                    status.write(f"✅ Kept {len(kept_frames)} frames after dedup")
 
                 status.write("Getting transcript...")
                 if engine == "external":
@@ -295,13 +310,17 @@ if st.session_state.stage == "setup":
             st.session_state.data = {
                 "video_title": video_title,
                 "project_dir": project_dir,
+                "audio_only": audio_only,
                 "kept_frames": kept_frames,
                 "segments": merged_segments,
                 "summary": summary,
                 "key_points": key_points,
                 "transcript_paths": transcript_paths,
-                "frame_text_map": compute_frame_text_map(kept_frames, merged_segments),
+                "frame_text_map": compute_frame_text_map(kept_frames, merged_segments) if not audio_only else {},
                 "included_frames": {f.name: True for f in kept_frames},
+                "full_transcript_text": "\n".join(
+                    f"[{seconds_to_hhmmss(seg['start'])}] {seg['text']}" for seg in merged_segments
+                ) if audio_only else "",
             }
             st.session_state.stage = "review"
             st.rerun()
@@ -335,26 +354,33 @@ elif st.session_state.stage == "review":
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
-    st.markdown(f"**Frames ({len(d['kept_frames'])})** — uncheck any you don't want in the final documents, "
-                f"and edit the paired transcript text if needed.")
+    if d["audio_only"]:
+        st.markdown("**Full transcript** (edit freely — this is what goes into the final documents)")
+        st.text_area(
+            "Full transcript", value=d["full_transcript_text"], height=400,
+            label_visibility="collapsed", key="edit_full_transcript",
+        )
+    else:
+        st.markdown(f"**Frames ({len(d['kept_frames'])})** — uncheck any you don't want in the final documents, "
+                    f"and edit the paired transcript text if needed.")
 
-    for frame_path in d["kept_frames"]:
-        with st.container(border=True):
-            cols = st.columns([1, 2])
-            with cols[0]:
-                include = st.checkbox(
-                    frame_path.stem.replace("frame_", "⏱ "),
-                    value=d["included_frames"].get(frame_path.name, True),
-                    key=f"include_{frame_path.name}",
-                )
-                st.image(str(frame_path), use_container_width=True)
-            with cols[1]:
-                st.text_area(
-                    "Transcript for this frame",
-                    value=d["frame_text_map"].get(frame_path.name, ""),
-                    height=220,
-                    key=f"text_{frame_path.name}",
-                )
+        for frame_path in d["kept_frames"]:
+            with st.container(border=True):
+                cols = st.columns([1, 2])
+                with cols[0]:
+                    include = st.checkbox(
+                        frame_path.stem.replace("frame_", "⏱ "),
+                        value=d["included_frames"].get(frame_path.name, True),
+                        key=f"include_{frame_path.name}",
+                    )
+                    st.image(str(frame_path), use_container_width=True)
+                with cols[1]:
+                    st.text_area(
+                        "Transcript for this frame",
+                        value=d["frame_text_map"].get(frame_path.name, ""),
+                        height=220,
+                        key=f"text_{frame_path.name}",
+                    )
 
     st.write("")
     generate_clicked = st.button("▶ Generate Word & PowerPoint documents", type="primary", use_container_width=True)
@@ -364,27 +390,46 @@ elif st.session_state.stage == "review":
         final_summary = st.session_state.get("edit_summary", d["summary"])
         final_key_points = [l.strip() for l in st.session_state.get("edit_key_points", "").splitlines() if l.strip()]
 
-        included = [f for f in d["kept_frames"] if st.session_state.get(f"include_{f.name}", True)]
-        text_overrides = {f.name: st.session_state.get(f"text_{f.name}", "") for f in d["kept_frames"]}
-
         with st.spinner("Building documents..."):
             outputs = {}
-            if gen_docx:
-                docx_path = d["project_dir"] / "video_report.docx"
-                build_document(
-                    frame_paths=included, segments=d["segments"], video_title=d["video_title"],
-                    output_path=docx_path, image_width_inches=image_width_inches,
-                    text_overrides=text_overrides, summary=final_summary, key_points=final_key_points,
-                )
-                outputs["docx_path"] = docx_path
-            if gen_pptx:
-                pptx_path = d["project_dir"] / "video_report.pptx"
-                build_pptx(
-                    frame_paths=included, segments=d["segments"], video_title=d["video_title"],
-                    output_path=pptx_path, summary=final_summary, key_points=final_key_points,
-                    text_overrides=text_overrides,
-                )
-                outputs["pptx_path"] = pptx_path
+            if d["audio_only"]:
+                final_transcript_text = st.session_state.get("edit_full_transcript", d["full_transcript_text"])
+                if gen_docx:
+                    docx_path = d["project_dir"] / "video_report.docx"
+                    build_audio_document(
+                        segments=d["segments"], video_title=d["video_title"], output_path=docx_path,
+                        summary=final_summary, key_points=final_key_points,
+                        transcript_text_override=final_transcript_text,
+                    )
+                    outputs["docx_path"] = docx_path
+                if gen_pptx:
+                    pptx_path = d["project_dir"] / "video_report.pptx"
+                    build_audio_pptx(
+                        segments=d["segments"], video_title=d["video_title"], output_path=pptx_path,
+                        summary=final_summary, key_points=final_key_points,
+                        transcript_text_override=final_transcript_text,
+                    )
+                    outputs["pptx_path"] = pptx_path
+                included = []
+            else:
+                included = [f for f in d["kept_frames"] if st.session_state.get(f"include_{f.name}", True)]
+                text_overrides = {f.name: st.session_state.get(f"text_{f.name}", "") for f in d["kept_frames"]}
+                if gen_docx:
+                    docx_path = d["project_dir"] / "video_report.docx"
+                    build_document(
+                        frame_paths=included, segments=d["segments"], video_title=d["video_title"],
+                        output_path=docx_path, image_width_inches=image_width_inches,
+                        text_overrides=text_overrides, summary=final_summary, key_points=final_key_points,
+                    )
+                    outputs["docx_path"] = docx_path
+                if gen_pptx:
+                    pptx_path = d["project_dir"] / "video_report.pptx"
+                    build_pptx(
+                        frame_paths=included, segments=d["segments"], video_title=d["video_title"],
+                        output_path=pptx_path, summary=final_summary, key_points=final_key_points,
+                        text_overrides=text_overrides,
+                    )
+                    outputs["pptx_path"] = pptx_path
 
         d["final_summary"] = final_summary
         d["final_key_points"] = final_key_points
@@ -442,8 +487,9 @@ elif st.session_state.stage == "done":
                 st.markdown(f"- {kp}")
         st.markdown('</div>', unsafe_allow_html=True)
 
-    st.subheader(f"Frames used ({len(d.get('included_frame_paths', []))})")
-    cols = st.columns(4)
-    for i, frame_path in enumerate(d.get("included_frame_paths", [])):
-        with cols[i % 4]:
-            st.image(str(frame_path), caption=frame_path.stem.replace("frame_", ""), use_container_width=True)
+    if not d.get("audio_only"):
+        st.subheader(f"Frames used ({len(d.get('included_frame_paths', []))})")
+        cols = st.columns(4)
+        for i, frame_path in enumerate(d.get("included_frame_paths", [])):
+            with cols[i % 4]:
+                st.image(str(frame_path), caption=frame_path.stem.replace("frame_", ""), use_container_width=True)

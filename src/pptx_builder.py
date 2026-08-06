@@ -214,6 +214,55 @@ def _add_frame_slide(slide, frame_path: Path, timestamp: float, texts: List[str]
                      "(no speech detected in this interval)", size=14, color=COLOR_MUTED)
 
 
+def _paginate_items(items: List[str], max_chars: int = 750, max_items: int = 6) -> List[List[str]]:
+    """Splits a list of strings into slide-sized chunks (by char budget and item count)."""
+    pages: List[List[str]] = []
+    current: List[str] = []
+    current_chars = 0
+    for item in items:
+        if current and (len(current) >= max_items or current_chars + len(item) > max_chars):
+            pages.append(current)
+            current, current_chars = [], 0
+        current.append(item)
+        current_chars += len(item)
+    if current:
+        pages.append(current)
+    return pages or [[]]
+
+
+def build_audio_pptx(segments: List[Dict], video_title: str, output_path: Path,
+                      summary: str = "", key_points: Optional[List[str]] = None,
+                      transcript_text_override: Optional[str] = None) -> Path:
+    """For audio-only input: title, summary, key points, then paginated transcript slides."""
+    prs = _new_presentation()
+
+    _add_title_slide(prs, video_title, 0)
+    _add_summary_slide(prs, summary)
+    _add_key_points_slide(prs, key_points or [])
+
+    if transcript_text_override is not None:
+        items = [l.strip() for l in transcript_text_override.splitlines() if l.strip()]
+    else:
+        items = [f"[{seconds_to_hhmmss(seg['start'])}]  {seg['text'].strip()}"
+                  for seg in segments if seg["text"].strip()]
+
+    pages = _paginate_items(items, max_chars=1500, max_items=10)
+    for i, page_items in enumerate(pages, 1):
+        slide = _blank_slide(prs)
+        _add_textbox(slide, Inches(0.7), Inches(0.5), Inches(11.9), Inches(0.7),
+                     f"Transcript ({i}/{len(pages)})", size=26, bold=True, color=COLOR_TITLE)
+        _add_card(slide, Inches(0.7), Inches(1.35), Inches(11.9), Inches(5.7))
+        total_chars = sum(len(t) for t in page_items)
+        font_size = 15 if total_chars <= 500 else (13 if total_chars <= 950 else 11)
+        _add_bullets(slide, Inches(1.1), Inches(1.7), Inches(11.1), Inches(5.1),
+                     page_items, size=font_size, space_after=8)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    prs.save(str(output_path))
+    logger.info(f"Saved audio transcript PowerPoint deck: {output_path}")
+    return output_path
+
+
 def build_pptx(frame_paths: List[Path], segments: List[Dict], video_title: str,
                output_path: Path, summary: str = "", key_points: Optional[List[str]] = None,
                text_overrides: Optional[Dict[str, str]] = None) -> Path:
