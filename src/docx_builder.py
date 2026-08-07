@@ -192,26 +192,36 @@ def build_document(frame_paths: List[Path], segments: List[Dict], video_title: s
     return output_path
 
 
-def build_chunked_document(chunks: List[Dict], video_title: str, output_path: Path,
+def build_chunked_document(groups: List[Dict], video_title: str, output_path: Path,
                             image_width_inches: float = 5.5, overall_summary: str = "",
                             overall_key_points: Optional[List[str]] = None) -> Path:
     """
-    Builds the "4-part" report: for each semantic chunk --
-      1. representative image(s)
-      2. a clickable link to that chunk's audio note clip (if one was generated)
-      3. the chunk's transcript
-      4. the chunk's own mini-summary + key point(s)
+    Builds the "4-part" report, structured in two levels:
 
-    Each item in `chunks` (see semantic_chunker.compute_chunks) is expected to
-    also carry, once processed: "images" (List[Path]), "audio_clip" (Path or
-    None, relative to output_path's folder), "summary" (str), "key_points" (List[str]).
+      Summary GROUP (spans several chunks, ~4-10 by default):
+        - a short summary of what this stretch covers
+        - "Key Takeaways" -- action items / decisions / notable facts, only
+          shown when there was enough material to actually distill (see
+          summarizer.MIN_SENTENCES_FOR_SUMMARY) -- no group summary is shown
+          otherwise, rather than restating the transcript back at the reader.
+        Then, for each chunk nested inside the group:
+          1. representative image(s)
+          2. a clickable link to that chunk's audio note clip (if generated)
+          3. the chunk's transcript
+
+    Expected shape of each item in `groups` (see semantic_chunker.group_chunks_
+    for_summary): {"start", "end", "chunks": [chunk, ...], "summary": str,
+    "key_points": [str, ...]}. Each nested chunk (see semantic_chunker.
+    compute_chunks) additionally carries "images" (List[Path]), "audio_clip"
+    (Path or None), and "transcript_text" (str).
     """
     from .utils import seconds_to_hhmmss as _ts
 
+    total_chunks = sum(len(g["chunks"]) for g in groups)
     doc = Document()
     title = doc.add_heading(video_title, level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    subtitle = doc.add_paragraph(f"Auto-generated report  •  {len(chunks)} sections")
+    subtitle = doc.add_paragraph(f"Auto-generated report  •  {total_chunks} sections")
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     if overall_summary:
@@ -224,44 +234,50 @@ def build_chunked_document(chunks: List[Dict], video_title: str, output_path: Pa
 
     doc.add_page_break()
 
-    for i, chunk in enumerate(chunks, 1):
-        doc.add_heading(f"Section {i}  ·  [{_ts(chunk['start'])} – {_ts(chunk['end'])}]", level=2)
+    chunk_counter = 0
+    for gi, group in enumerate(groups, 1):
+        has_group_summary = bool(group.get("summary") or group.get("key_points"))
+        if has_group_summary:
+            doc.add_heading(f"[{_ts(group['start'])} – {_ts(group['end'])}]", level=1)
+            if group.get("summary"):
+                doc.add_paragraph(group["summary"]).paragraph_format.space_after = Pt(4)
+            if group.get("key_points"):
+                p = doc.add_paragraph()
+                run = p.add_run("Key Takeaways")
+                run.bold = True
+                run.font.color.rgb = RGBColor(0x2E, 0x6B, 0x5E)
+                for kp in group["key_points"]:
+                    doc.add_paragraph(kp, style="List Bullet")
+            doc.add_paragraph("").paragraph_format.space_after = Pt(2)
 
-        # 1. Image(s)
-        for img in chunk.get("images", []):
-            try:
-                doc.add_picture(str(img), width=Inches(image_width_inches))
-            except Exception as e:
-                logger.warning(f"Could not insert image {img}: {e}")
+        for chunk in group["chunks"]:
+            chunk_counter += 1
+            doc.add_heading(f"Section {chunk_counter}  ·  [{_ts(chunk['start'])} – {_ts(chunk['end'])}]", level=2)
 
-        # 2. Audio note link
-        audio_clip = chunk.get("audio_clip")
-        if audio_clip:
-            p = doc.add_paragraph()
-            rel_path = f"audio_notes/{Path(audio_clip).name}"
-            _add_hyperlink(p, f"🔊 Play audio note ({Path(audio_clip).name})", rel_path)
-            p.paragraph_format.space_after = Pt(6)
+            # 1. Image(s)
+            for img in chunk.get("images", []):
+                try:
+                    doc.add_picture(str(img), width=Inches(image_width_inches))
+                except Exception as e:
+                    logger.warning(f"Could not insert image {img}: {e}")
 
-        # 3. Transcript
-        transcript_text = chunk.get("transcript_text", "")
-        if transcript_text:
-            p = doc.add_paragraph(transcript_text)
-            p.paragraph_format.space_after = Pt(8)
-        else:
-            doc.add_paragraph("(no speech detected in this section)").paragraph_format.space_after = Pt(8)
+            # 2. Audio note link
+            audio_clip = chunk.get("audio_clip")
+            if audio_clip:
+                p = doc.add_paragraph()
+                rel_path = f"audio_notes/{Path(audio_clip).name}"
+                _add_hyperlink(p, f"🔊 Play audio note ({Path(audio_clip).name})", rel_path)
+                p.paragraph_format.space_after = Pt(6)
 
-        # 4. Mini-summary + key point(s)
-        if chunk.get("summary"):
-            p = doc.add_paragraph()
-            run = p.add_run("Summary: ")
-            run.bold = True
-            run.font.color.rgb = RGBColor(0x2E, 0x6B, 0x5E)
-            p.add_run(chunk["summary"])
-            p.paragraph_format.space_after = Pt(4)
-        for kp in chunk.get("key_points", []):
-            doc.add_paragraph(kp, style="List Bullet")
+            # 3. Transcript
+            transcript_text = chunk.get("transcript_text", "")
+            if transcript_text:
+                p = doc.add_paragraph(transcript_text)
+                p.paragraph_format.space_after = Pt(8)
+            else:
+                doc.add_paragraph("(no speech detected in this section)").paragraph_format.space_after = Pt(8)
 
-        if i < len(chunks):
+        if gi < len(groups):
             doc.add_paragraph("").paragraph_format.space_after = Pt(4)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

@@ -66,13 +66,21 @@ transcription:
   external_transcript_dir: "input_transcripts"
   external_transcript_filename: "my_transcript.srt"
 
-  # Used when engine = "local". Options: tiny, base, small, medium, large-v2, large-v3
-  # Bigger = more accurate but slower / more RAM or VRAM.
+  # Used when engine = "local". Options (smallest/fastest to largest/most
+  # accurate): tiny, base, small, medium, large-v2, large-v3, large-v3-turbo,
+  # distil-large-v3 (distilled, ~6x faster than large-v3 with close accuracy).
+  # "large-v3" is the most accurate; "large-v3-turbo" is nearly as accurate
+  # but noticeably faster -- a good default if your machine can run it.
+  # Rough VRAM/RAM needs: tiny/base/small ~1-2GB, medium ~5GB, large-* ~10GB
+  # (less with int8 compute_type below). First use of a model downloads it
+  # (a few hundred MB to ~3GB) and caches it locally.
   local_model: "medium"
 
   # Device for local model: "cpu", "cuda", or "auto"
   local_device: "auto"
-  local_compute_type: "auto"   # e.g. int8, float16, float32, auto
+  # Compute precision: "auto", "int8" (smallest/fastest, slight accuracy loss,
+  # good for CPU or limited VRAM), "float16" (GPU), "float32" (most accurate, slowest)
+  local_compute_type: "auto"
 
   # Used when engine = "api". Reads the key from this environment variable.
   api_key_env: "OPENAI_API_KEY"
@@ -96,10 +104,10 @@ summarization:
   api_key_env: "OPENAI_API_KEY"
 
 chunking:
-  # This is the "4-part report" mode: image(s) + audio note + transcript + a
-  # mini-summary, grouped into semantically coherent sections instead of one
-  # section per raw frame. Only applies to video input with frames (ignored
-  # for audio-only input, and skipped automatically if no frames exist).
+  # This is the "4-part report" mode: image(s) + audio note + transcript, with
+  # a real summary/action-items block covering a group of several sections
+  # (not one summary per tiny section -- see group settings below). Only
+  # applies to video input with frames; ignored for audio-only input.
   # Set to false to get the classic one-section-per-frame report instead.
   enabled: true
 
@@ -121,12 +129,24 @@ chunking:
   # doc, embedded/playable in the PowerPoint deck where supported).
   generate_audio_notes: true
 
-  # Per-section mini-summary method. Defaults to "local" (fast, free, no API
-  # calls) since there can be many sections; set to "openai"/"auto" for higher
-  # quality if you don't mind the extra API calls.
-  chunk_summary_method: "local"
-  chunk_max_summary_sentences: 2
-  chunk_max_key_points: 3
+  # --- Summary grouping ---
+  # Summarizing one tiny 2-4-sentence section on its own has nothing to
+  # compress -- it just restates itself. Instead, several consecutive sections
+  # are grouped together (by count and/or total time) before summarizing, so
+  # there's enough transcript for a summary to actually be *shorter* than the
+  # source. The frames/audio/transcript display stays at the fine-grained
+  # per-section level; only the summary is generated at this coarser level.
+  summary_group_size: 6          # combine up to this many sections per summary
+  max_summary_group_seconds: 180 # ...or this many seconds, whichever comes first
+
+  # Method for these group-level summaries. "local" (default) is fast/free
+  # with no API calls, using extractive TextRank -- good since a video can
+  # have many groups. Switch to "openai"/"auto" for higher-quality, genuinely
+  # synthesized action items (the local method can only select existing
+  # sentences, not write new ones).
+  group_summary_method: "local"
+  group_max_summary_sentences: 3
+  group_max_key_points: 6
 
 output:
   base_dir: "output"

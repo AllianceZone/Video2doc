@@ -156,8 +156,8 @@ reasonable for large files.
 ## Semantic sections & audio notes
 
 Controlled by `chunking` in the config (or the sidebar in the UI). On by
-default -- this is the "image + audio note + transcript + mini-summary" report
-format. What it does:
+default -- this is the "image + audio note + transcript + takeaway summary"
+report format. What it does:
 
 - Walks through kept frames in order, computing how topically similar each
   frame's transcript text is to the next (TF-IDF cosine similarity). Similar,
@@ -170,15 +170,33 @@ format. What it does:
   hyperlink (keep the `audio_notes/` folder next to the `.docx` for it to
   resolve); in the PowerPoint deck it's embedded as a playable click-to-play
   icon directly on the slide.
-- Generates a **mini-summary + 1-3 key points specific to that section**
-  (local extractive by default, since a video can have many sections and this
-  avoids piling up API calls -- switch `chunk_summary_method` to `"openai"`
-  or `"auto"` for higher quality per-section summaries).
+- **Summaries are generated one level up from sections, not per-section.**
+  Summarizing a single tiny 2-4-sentence section has nothing to compress --
+  it just restates itself. Instead, several consecutive sections (`summary_
+  group_size`, default 6, or capped by `max_summary_group_seconds`) get
+  combined into one "takeaway" summary + key points, shown once above that
+  stretch of sections. If a group still doesn't have enough transcript to
+  meaningfully condense, no summary is shown for it at all, rather than
+  faking one by repeating the transcript back.
 
-Tune it via `similarity_threshold` (lower = merges more aggressively),
-`max_chunk_seconds` (hard cap on section length regardless of topic), and
-`max_frames_per_chunk`. Set `chunking.enabled: false` to fall back to the
-classic one-section-per-frame report instead.
+Tune the section grouping via `similarity_threshold` (lower = merges more
+aggressively), `max_chunk_seconds` (hard cap on section length regardless of
+topic), and `max_frames_per_chunk`. Tune the summary grouping via
+`summary_group_size` / `max_summary_group_seconds`, and `group_summary_method`
+("local" = fast/free extractive, picks existing sentences; "openai"/"auto" =
+genuinely written action items and takeaways, at the cost of an API call per
+group). Set `chunking.enabled: false` to fall back to the classic
+one-section-per-frame report instead.
+
+## Bigger local Whisper models
+
+`transcription.local_model` (or the sidebar dropdown) now includes the larger
+options: `large-v2`, `large-v3` (most accurate), `large-v3-turbo` (nearly as
+accurate, noticeably faster), and `distil-large-v3` (~6x faster than
+large-v3 with a small accuracy trade-off). Rough memory needs: tiny/base/small
+~1-2GB, medium ~5GB, large-*/turbo ~6-10GB (less with `local_compute_type:
+"int8"`). The first run with a given model downloads it (up to ~3GB) and
+caches it locally.
 
 ## Summary & key points
 

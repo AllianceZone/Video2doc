@@ -154,6 +154,15 @@ def _add_key_points_slide(prs: Presentation, key_points: List[str]):
                  fitted, size=font_size, space_after=10)
 
 
+def _truncate_text(text: str, max_chars: int) -> str:
+    """Cuts a single block of text at a word boundary with an ellipsis, unlike
+    _fit_texts_to_slide (which is for lists of separate bullet items and would
+    just replace an over-budget single item with a placeholder note)."""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars].rsplit(" ", 1)[0].rstrip(",.;: ") + "…"
+
+
 def _fit_texts_to_slide(texts: List[str], max_chars: int = 850, max_items: int = 7) -> List[str]:
     """Caps bullet content so it can't overflow the card; points to the Word doc for the rest."""
     fitted = []
@@ -286,7 +295,7 @@ def _add_audio_icon(slide, audio_path: Path, left, top, size=Inches(0.55)):
 
 
 def _add_chunk_slide(slide, images: List[Path], audio_path, start: float, end: float,
-                      transcript_text: str, chunk_summary: str, chunk_key_points: List[str]):
+                      transcript_text: str):
     _add_textbox(slide, Inches(0.6), Inches(0.35), Inches(11.5), Inches(0.55),
                  f"[{seconds_to_hhmmss(start)} – {seconds_to_hhmmss(end)}]",
                  size=19, bold=True, color=COLOR_ACCENT)
@@ -324,42 +333,93 @@ def _add_chunk_slide(slide, images: List[Path], audio_path, start: float, end: f
         _add_textbox(slide, text_left + Inches(0.75), Inches(1.08), Inches(3.5), Inches(0.4),
                      "Audio note", size=12, color=COLOR_MUTED)
 
-    # 3 & 4. Transcript + mini-summary/key points, on a card
+    # 3. Transcript, on a card (no per-chunk summary anymore -- see the group
+    # takeaways slide instead, which has real material to work with)
     card_top = Inches(1.75)
     _add_card(slide, text_left, card_top, Inches(5.45), Inches(5.3))
 
-    content: List[str] = []
-    if transcript_text:
-        content.extend(split_sentences(transcript_text))
-    if chunk_summary:
-        content.append(f"Summary: {chunk_summary}")
-    content.extend(chunk_key_points or [])
-
-    fitted = _fit_texts_to_slide(content, max_chars=950, max_items=9)
-    font_size = 13 if sum(len(t) for t in fitted) <= 700 else 11
-    _add_bullets(slide, text_left + Inches(0.3), card_top + Inches(0.3), Inches(4.85), Inches(4.7),
-                 fitted, size=font_size, space_after=8)
+    content = split_sentences(transcript_text) if transcript_text else []
+    if content:
+        fitted = _fit_texts_to_slide(content, max_chars=1150, max_items=11)
+        font_size = 14 if sum(len(t) for t in fitted) <= 700 else (13 if sum(len(t) for t in fitted) <= 950 else 11)
+        _add_bullets(slide, text_left + Inches(0.3), card_top + Inches(0.3), Inches(4.85), Inches(4.7),
+                     fitted, size=font_size, space_after=8)
+    else:
+        _add_textbox(slide, text_left + Inches(0.3), card_top + Inches(0.3), Inches(4.85), Inches(1.0),
+                     "(no speech detected in this section)", size=13, color=COLOR_MUTED)
 
 
-def build_chunked_pptx(chunks: List[Dict], video_title: str, output_path: Path,
+def _add_group_takeaways_slide(prs: Presentation, start: float, end: float,
+                                summary: str, key_points: List[str]):
+    """One slide per summary group (spanning several chunks): what this
+    stretch covers + concrete takeaways. Skipped entirely if there wasn't
+    enough material to distill anything (see summarizer.MIN_SENTENCES_FOR_SUMMARY).
+
+    Summary and key points get separate layout regions (rather than being
+    thrown into one bullet-fitting call) so a long summary paragraph can't eat
+    the entire char budget and leave zero room for the key points themselves.
+    """
+    if not summary and not key_points:
+        return
+    slide = _blank_slide(prs)
+    _add_textbox(slide, Inches(0.7), Inches(0.5), Inches(11.9), Inches(0.7),
+                 f"[{seconds_to_hhmmss(start)} – {seconds_to_hhmmss(end)}]",
+                 size=26, bold=True, color=COLOR_TITLE)
+
+    if summary and key_points:
+        # Summary on top (own card), key points below (own card) -- each gets
+        # its own space so neither can starve the other.
+        summary_h = Inches(2.15)
+        _add_card(slide, Inches(0.7), Inches(1.35), Inches(11.9), summary_h)
+        fitted_summary = _truncate_text(summary, 650)
+        font_size = 15 if len(fitted_summary) <= 350 else 13
+        _add_textbox(slide, Inches(1.1), Inches(1.6), Inches(11.1), summary_h - Inches(0.5),
+                     fitted_summary, size=font_size, color=COLOR_BODY)
+
+        kp_top = Inches(1.35) + summary_h + Inches(0.2)
+        kp_h = Inches(7.5) - kp_top - Inches(0.4)
+        _add_card(slide, Inches(0.7), kp_top, Inches(11.9), kp_h)
+        fitted_kp = _fit_texts_to_slide(key_points, max_chars=650, max_items=6)
+        kp_font = 14 if sum(len(t) for t in fitted_kp) <= 400 else 12
+        _add_bullets(slide, Inches(1.1), kp_top + Inches(0.25), Inches(11.1), kp_h - Inches(0.4),
+                     fitted_kp, size=kp_font, space_after=8)
+    else:
+        _add_card(slide, Inches(0.7), Inches(1.35), Inches(11.9), Inches(5.7))
+        if summary:
+            fitted = _truncate_text(summary, 1200)
+            _add_textbox(slide, Inches(1.1), Inches(1.7), Inches(11.1), Inches(5.1),
+                         fitted, size=16, color=COLOR_BODY)
+        else:
+            fitted = _fit_texts_to_slide(key_points, max_chars=1300, max_items=10)
+            font_size = 16 if sum(len(t) for t in fitted) <= 600 else 14
+            _add_bullets(slide, Inches(1.1), Inches(1.7), Inches(11.1), Inches(5.1),
+                         fitted, size=font_size, space_after=10)
+
+
+def build_chunked_pptx(groups: List[Dict], video_title: str, output_path: Path,
                         overall_summary: str = "", overall_key_points: Optional[List[str]] = None) -> Path:
     """
-    One slide per semantic chunk: image(s) + embedded audio note + transcript +
-    chunk-level mini-summary/key points. See docx_builder.build_chunked_document
-    for the expected shape of each chunk dict.
+    Structured in two levels, matching docx_builder.build_chunked_document:
+      - one "takeaways" slide per summary group (skipped if nothing to distill)
+      - one slide per chunk nested in that group: image(s) + audio note + transcript
+    See semantic_chunker.group_chunks_for_summary for the expected input shape.
     """
+    total_chunks = sum(len(g["chunks"]) for g in groups)
     prs = _new_presentation()
-    _add_title_slide(prs, video_title, len(chunks))
+    _add_title_slide(prs, video_title, total_chunks)
     _add_summary_slide(prs, overall_summary)
     _add_key_points_slide(prs, overall_key_points or [])
 
-    for chunk in chunks:
-        slide = _blank_slide(prs)
-        _add_chunk_slide(
-            slide, images=chunk.get("images", []), audio_path=chunk.get("audio_clip"),
-            start=chunk["start"], end=chunk["end"], transcript_text=chunk.get("transcript_text", ""),
-            chunk_summary=chunk.get("summary", ""), chunk_key_points=chunk.get("key_points", []),
+    for group in groups:
+        _add_group_takeaways_slide(
+            prs, group["start"], group["end"], group.get("summary", ""), group.get("key_points", []),
         )
+        for chunk in group["chunks"]:
+            slide = _blank_slide(prs)
+            _add_chunk_slide(
+                slide, images=chunk.get("images", []), audio_path=chunk.get("audio_clip"),
+                start=chunk["start"], end=chunk["end"], transcript_text=chunk.get("transcript_text", ""),
+            )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(output_path))

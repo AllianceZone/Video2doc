@@ -71,6 +71,47 @@ def compute_chunks(frame_paths: List[Path], segments: List[Dict],
     return result
 
 
+def group_chunks_for_summary(chunks: List[Dict], group_size: int = 6,
+                              max_group_seconds: float = 180.0) -> List[Dict]:
+    """
+    Groups consecutive semantic chunks (see compute_chunks) into larger "summary
+    groups" so summaries are generated from enough transcript to actually
+    compress something. Summarizing one tiny 2-4-sentence chunk on its own has
+    nothing to condense -- it just restates the chunk. Combining ~4-10 chunks
+    worth of transcript gives the summarizer real material to work with.
+
+    The fine-grained chunks (with their own images/audio/transcript) are kept
+    nested inside each group unchanged -- grouping only affects where the
+    *summary* is generated and shown, not the frame/audio/transcript display.
+
+    Returns a list of: {"start": float, "end": float, "chunks": [chunk, ...],
+    "segments": [Dict, ...]} (segments = every transcript segment across all
+    chunks in the group, for summarization).
+    """
+    if not chunks:
+        return []
+
+    groups: List[List[Dict]] = [[chunks[0]]]
+    for c in chunks[1:]:
+        current = groups[-1]
+        span = c["end"] - current[0]["start"]
+        if len(current) >= group_size or span > max_group_seconds:
+            groups.append([c])
+        else:
+            current.append(c)
+
+    result = []
+    for g in groups:
+        start = g[0]["start"]
+        end = g[-1]["end"]
+        segments = [seg for chunk in g for seg in chunk["segments"]]
+        result.append({"start": start, "end": end, "chunks": g, "segments": segments})
+
+    logger.info(f"Grouped {len(chunks)} chunks into {len(result)} summary groups "
+                f"(group_size={group_size}, max_group_seconds={max_group_seconds})")
+    return result
+
+
 def representative_images(chunk: Dict) -> List[Path]:
     """First + last frame of the chunk (deduped) -- the 'club two frames' rule."""
     frames = chunk["frames"]
