@@ -95,6 +95,39 @@ summarization:
   openai_model: "gpt-4o-mini"
   api_key_env: "OPENAI_API_KEY"
 
+chunking:
+  # This is the "4-part report" mode: image(s) + audio note + transcript + a
+  # mini-summary, grouped into semantically coherent sections instead of one
+  # section per raw frame. Only applies to video input with frames (ignored
+  # for audio-only input, and skipped automatically if no frames exist).
+  # Set to false to get the classic one-section-per-frame report instead.
+  enabled: true
+
+  # How similar two consecutive frames' transcript text must be (TF-IDF cosine,
+  # 0-1) to merge them into the same section. Lower = merges more aggressively
+  # (fewer, larger sections); higher = splits more readily (more, smaller ones).
+  similarity_threshold: 0.15
+
+  # Hard cap on how much time a single section can span, regardless of topic
+  # similarity, so one long silent/continuous scene doesn't become one giant
+  # section.
+  max_chunk_seconds: 60
+
+  # Hard cap on how many original frames get folded into one section (only the
+  # first + last are actually shown as images -- see the module docstring).
+  max_frames_per_chunk: 4
+
+  # Extract a short audio clip per section and attach it (linked in the Word
+  # doc, embedded/playable in the PowerPoint deck where supported).
+  generate_audio_notes: true
+
+  # Per-section mini-summary method. Defaults to "local" (fast, free, no API
+  # calls) since there can be many sections; set to "openai"/"auto" for higher
+  # quality if you don't mind the extra API calls.
+  chunk_summary_method: "local"
+  chunk_max_summary_sentences: 2
+  chunk_max_key_points: 3
+
 output:
   base_dir: "output"
   generate_docx: true

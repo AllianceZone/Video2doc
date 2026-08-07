@@ -25,8 +25,10 @@ from src.transcriber import transcribe, save_transcript_files
 from src.transcript_parser import load_external_transcript
 from src.text_utils import merge_into_sentences
 from src.summarizer import generate_summary
-from src.docx_builder import build_document, build_audio_document, compute_frame_text_map
-from src.pptx_builder import build_pptx, build_audio_pptx
+from src.docx_builder import build_document, build_audio_document, build_chunked_document, compute_frame_text_map
+from src.pptx_builder import build_pptx, build_audio_pptx, build_chunked_pptx
+from src.semantic_chunker import compute_chunks, representative_images
+from src.audio_clipper import extract_audio_clip
 
 st.set_page_config(page_title="video2doc", page_icon="🎬", layout="wide")
 setup_logging("INFO")
@@ -162,6 +164,25 @@ with st.sidebar:
         gen_docx = st.checkbox("Generate Word document", value=True)
         gen_pptx = st.checkbox("Generate PowerPoint deck", value=True)
         image_width_inches = st.slider("Word doc image width (in)", 3.0, 8.0, 6.0)
+
+    with st.expander("🧩 Semantic sections & audio notes", expanded=True):
+        chunking_enabled = st.checkbox(
+            "Group frames into sections (image + audio note + transcript + mini-summary)",
+            value=True,
+            help="Instead of one entry per raw frame, groups topically-similar consecutive "
+                 "frames into one section, each with a representative image (or two), a short "
+                 "audio clip, its transcript, and its own mini-summary + key point(s). "
+                 "Turn off to get the classic one-entry-per-frame report."
+        )
+        similarity_threshold = st.slider(
+            "Topic similarity threshold", 0.0, 0.6, 0.15,
+            help="Lower = merges more aggressively into fewer, larger sections")
+        max_chunk_seconds = st.slider("Max section length (seconds)", 10, 180, 60)
+        max_frames_per_chunk = st.slider("Max frames folded into one section", 2, 8, 4)
+        generate_audio_notes = st.checkbox("Attach audio note clips", value=True)
+        chunk_summary_method = st.selectbox(
+            "Per-section summary method", ["local", "auto", "openai"], index=0,
+            help="local = fast/free, no API calls -- recommended since there can be many sections")
 
 # ============================================================================
 # STAGE: SETUP & RUN
@@ -310,6 +331,7 @@ if st.session_state.stage == "setup":
             st.session_state.data = {
                 "video_title": video_title,
                 "project_dir": project_dir,
+                "video_path": video_path,
                 "audio_only": audio_only,
                 "kept_frames": kept_frames,
                 "segments": merged_segments,
@@ -363,6 +385,11 @@ elif st.session_state.stage == "review":
     else:
         st.markdown(f"**Frames ({len(d['kept_frames'])})** — uncheck any you don't want in the final documents, "
                     f"and edit the paired transcript text if needed.")
+        if chunking_enabled:
+            st.caption("🧩 Semantic sections mode is on: frames will be grouped into topical sections at export "
+                       "time. Include/exclude checkboxes below are respected, but per-frame text edits are not "
+                       "(each section's transcript is regenerated fresh from the source transcript). "
+                       "Turn off grouping in the sidebar to use per-frame text edits directly.")
 
         for frame_path in d["kept_frames"]:
             with st.container(border=True):
@@ -413,23 +440,63 @@ elif st.session_state.stage == "review":
                 included = []
             else:
                 included = [f for f in d["kept_frames"] if st.session_state.get(f"include_{f.name}", True)]
-                text_overrides = {f.name: st.session_state.get(f"text_{f.name}", "") for f in d["kept_frames"]}
-                if gen_docx:
-                    docx_path = d["project_dir"] / "video_report.docx"
-                    build_document(
-                        frame_paths=included, segments=d["segments"], video_title=d["video_title"],
-                        output_path=docx_path, image_width_inches=image_width_inches,
-                        text_overrides=text_overrides, summary=final_summary, key_points=final_key_points,
+
+                if chunking_enabled and included:
+                    st.write("Grouping frames into semantic sections...")
+                    chunks = compute_chunks(
+                        included, d["segments"], similarity_threshold=similarity_threshold,
+                        max_chunk_seconds=max_chunk_seconds, max_frames_per_chunk=max_frames_per_chunk,
                     )
-                    outputs["docx_path"] = docx_path
-                if gen_pptx:
-                    pptx_path = d["project_dir"] / "video_report.pptx"
-                    build_pptx(
-                        frame_paths=included, segments=d["segments"], video_title=d["video_title"],
-                        output_path=pptx_path, summary=final_summary, key_points=final_key_points,
-                        text_overrides=text_overrides,
-                    )
-                    outputs["pptx_path"] = pptx_path
+                    audio_notes_dir = ensure_dir(d["project_dir"] / "audio_notes") if generate_audio_notes else None
+                    for chunk in chunks:
+                        chunk["images"] = representative_images(chunk)
+                        chunk["transcript_text"] = " ".join(s["text"].strip() for s in chunk["segments"]).strip()
+                        chunk["audio_clip"] = (
+                            extract_audio_clip(d["video_path"], chunk["start"], chunk["end"], audio_notes_dir)
+                            if audio_notes_dir else None
+                        )
+                        if chunk["segments"]:
+                            cr = generate_summary(
+                                chunk["segments"], method=chunk_summary_method,
+                                max_summary_sentences=2, max_key_points=3,
+                            )
+                            chunk["summary"], chunk["key_points"] = cr["summary"], cr["key_points"]
+                        else:
+                            chunk["summary"], chunk["key_points"] = "", []
+
+                    if gen_docx:
+                        docx_path = d["project_dir"] / "video_report.docx"
+                        build_chunked_document(
+                            chunks=chunks, video_title=d["video_title"], output_path=docx_path,
+                            image_width_inches=image_width_inches,
+                            overall_summary=final_summary, overall_key_points=final_key_points,
+                        )
+                        outputs["docx_path"] = docx_path
+                    if gen_pptx:
+                        pptx_path = d["project_dir"] / "video_report.pptx"
+                        build_chunked_pptx(
+                            chunks=chunks, video_title=d["video_title"], output_path=pptx_path,
+                            overall_summary=final_summary, overall_key_points=final_key_points,
+                        )
+                        outputs["pptx_path"] = pptx_path
+                else:
+                    text_overrides = {f.name: st.session_state.get(f"text_{f.name}", "") for f in d["kept_frames"]}
+                    if gen_docx:
+                        docx_path = d["project_dir"] / "video_report.docx"
+                        build_document(
+                            frame_paths=included, segments=d["segments"], video_title=d["video_title"],
+                            output_path=docx_path, image_width_inches=image_width_inches,
+                            text_overrides=text_overrides, summary=final_summary, key_points=final_key_points,
+                        )
+                        outputs["docx_path"] = docx_path
+                    if gen_pptx:
+                        pptx_path = d["project_dir"] / "video_report.pptx"
+                        build_pptx(
+                            frame_paths=included, segments=d["segments"], video_title=d["video_title"],
+                            output_path=pptx_path, summary=final_summary, key_points=final_key_points,
+                            text_overrides=text_overrides,
+                        )
+                        outputs["pptx_path"] = pptx_path
 
         d["final_summary"] = final_summary
         d["final_key_points"] = final_key_points

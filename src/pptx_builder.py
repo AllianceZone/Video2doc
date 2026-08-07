@@ -20,6 +20,7 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.util import Inches, Pt
 
 from .utils import hhmmss_to_seconds, seconds_to_hhmmss
+from .text_utils import split_sentences
 
 logger = logging.getLogger("video2doc.pptx_builder")
 
@@ -260,6 +261,109 @@ def build_audio_pptx(segments: List[Dict], video_title: str, output_path: Path,
     output_path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(output_path))
     logger.info(f"Saved audio transcript PowerPoint deck: {output_path}")
+    return output_path
+
+
+def _add_audio_icon(slide, audio_path: Path, left, top, size=Inches(0.55)):
+    """
+    Embeds a playable audio clip on the slide (click-to-play icon), using
+    python-pptx's add_movie() -- despite the name, PowerPoint's media model
+    treats short audio the same way, so passing an audio mime type here embeds
+    a working audio object rather than a video. Falls back to a text label
+    with the filename if embedding fails for any reason (e.g. an unusual codec).
+    """
+    try:
+        slide.shapes.add_movie(
+            str(audio_path), left, top, size, size,
+            poster_frame_image=None, mime_type="audio/mpeg",
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"Could not embed audio {audio_path}, falling back to text label: {e}")
+        _add_textbox(slide, left, top, Inches(3.0), Inches(0.4),
+                     f"🔊 {Path(audio_path).name}", size=12, color=COLOR_ACCENT)
+        return False
+
+
+def _add_chunk_slide(slide, images: List[Path], audio_path, start: float, end: float,
+                      transcript_text: str, chunk_summary: str, chunk_key_points: List[str]):
+    _add_textbox(slide, Inches(0.6), Inches(0.35), Inches(11.5), Inches(0.55),
+                 f"[{seconds_to_hhmmss(start)} – {seconds_to_hhmmss(end)}]",
+                 size=19, bold=True, color=COLOR_ACCENT)
+
+    # 1. Image(s) -- up to two, stacked or side-by-side depending on count
+    img_left, img_top = Inches(0.6), Inches(1.0)
+    img_area_w, img_area_h = Inches(6.4), Inches(6.05)
+    if images:
+        n = len(images)
+        slot_h = img_area_h / n if n > 1 else img_area_h
+        for idx, img in enumerate(images):
+            try:
+                with Image.open(img) as im:
+                    iw, ih = im.size
+                gap = Inches(0.15) if n > 1 else 0
+                box_w, box_h = img_area_w, int(slot_h) - gap
+                box_ratio = box_w / box_h
+                img_ratio = iw / ih
+                if img_ratio > box_ratio:
+                    draw_w = box_w
+                    draw_h = Inches(box_w / img_ratio / Inches(1))
+                else:
+                    draw_h = box_h
+                    draw_w = Inches(box_h * img_ratio / Inches(1))
+                left = img_left + (box_w - draw_w) / 2
+                top = img_top + int(idx * slot_h) + (box_h - draw_h) / 2
+                slide.shapes.add_picture(str(img), left, top, width=draw_w, height=draw_h)
+            except Exception as e:
+                logger.warning(f"Could not insert image {img}: {e}")
+
+    # 2. Audio note icon, top-right of the text column
+    text_left = Inches(7.3)
+    if audio_path:
+        _add_audio_icon(slide, audio_path, text_left, Inches(1.0))
+        _add_textbox(slide, text_left + Inches(0.75), Inches(1.08), Inches(3.5), Inches(0.4),
+                     "Audio note", size=12, color=COLOR_MUTED)
+
+    # 3 & 4. Transcript + mini-summary/key points, on a card
+    card_top = Inches(1.75)
+    _add_card(slide, text_left, card_top, Inches(5.45), Inches(5.3))
+
+    content: List[str] = []
+    if transcript_text:
+        content.extend(split_sentences(transcript_text))
+    if chunk_summary:
+        content.append(f"Summary: {chunk_summary}")
+    content.extend(chunk_key_points or [])
+
+    fitted = _fit_texts_to_slide(content, max_chars=950, max_items=9)
+    font_size = 13 if sum(len(t) for t in fitted) <= 700 else 11
+    _add_bullets(slide, text_left + Inches(0.3), card_top + Inches(0.3), Inches(4.85), Inches(4.7),
+                 fitted, size=font_size, space_after=8)
+
+
+def build_chunked_pptx(chunks: List[Dict], video_title: str, output_path: Path,
+                        overall_summary: str = "", overall_key_points: Optional[List[str]] = None) -> Path:
+    """
+    One slide per semantic chunk: image(s) + embedded audio note + transcript +
+    chunk-level mini-summary/key points. See docx_builder.build_chunked_document
+    for the expected shape of each chunk dict.
+    """
+    prs = _new_presentation()
+    _add_title_slide(prs, video_title, len(chunks))
+    _add_summary_slide(prs, overall_summary)
+    _add_key_points_slide(prs, overall_key_points or [])
+
+    for chunk in chunks:
+        slide = _blank_slide(prs)
+        _add_chunk_slide(
+            slide, images=chunk.get("images", []), audio_path=chunk.get("audio_clip"),
+            start=chunk["start"], end=chunk["end"], transcript_text=chunk.get("transcript_text", ""),
+            chunk_summary=chunk.get("summary", ""), chunk_key_points=chunk.get("key_points", []),
+        )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    prs.save(str(output_path))
+    logger.info(f"Saved chunked PowerPoint deck: {output_path}")
     return output_path
 
 

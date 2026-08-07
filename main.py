@@ -28,8 +28,10 @@ from src.transcriber import transcribe, save_transcript_files
 from src.transcript_parser import load_external_transcript
 from src.text_utils import merge_into_sentences
 from src.summarizer import generate_summary
-from src.docx_builder import build_document, build_audio_document
-from src.pptx_builder import build_pptx, build_audio_pptx
+from src.docx_builder import build_document, build_audio_document, build_chunked_document
+from src.pptx_builder import build_pptx, build_audio_pptx, build_chunked_pptx
+from src.semantic_chunker import compute_chunks, representative_images
+from src.audio_clipper import extract_audio_clip
 
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"}
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".wma", ".opus"}
@@ -133,6 +135,39 @@ def process_one_video(video_path: Path, cfg: dict, base_out: Path, logger) -> di
             encoding="utf-8",
         )
 
+    # ---- Semantic chunking + per-chunk audio notes/mini-summaries (video only) ----
+    chunks = None
+    ck_cfg = cfg.get("chunking", {"enabled": True})
+    if not audio_only and ck_cfg.get("enabled", True) and kept_frames:
+        logger.info("Grouping frames into semantic chunks...")
+        chunks = compute_chunks(
+            kept_frames, merged_segments,
+            similarity_threshold=ck_cfg.get("similarity_threshold", 0.15),
+            max_chunk_seconds=ck_cfg.get("max_chunk_seconds", 60),
+            max_frames_per_chunk=ck_cfg.get("max_frames_per_chunk", 4),
+        )
+        want_audio_notes = ck_cfg.get("generate_audio_notes", True)
+        audio_notes_dir = ensure_dir(project_dir / "audio_notes") if want_audio_notes else None
+
+        for chunk in chunks:
+            chunk["images"] = representative_images(chunk)
+            chunk["transcript_text"] = " ".join(s["text"].strip() for s in chunk["segments"]).strip()
+            chunk["audio_clip"] = (
+                extract_audio_clip(video_path, chunk["start"], chunk["end"], audio_notes_dir)
+                if audio_notes_dir else None
+            )
+            if sm_cfg.get("enabled", True) and chunk["segments"]:
+                cr = generate_summary(
+                    chunk["segments"], method=ck_cfg.get("chunk_summary_method", "local"),
+                    api_key_env=sm_cfg.get("api_key_env", "OPENAI_API_KEY"),
+                    openai_model=sm_cfg.get("openai_model", "gpt-4o-mini"),
+                    max_summary_sentences=ck_cfg.get("chunk_max_summary_sentences", 2),
+                    max_key_points=ck_cfg.get("chunk_max_key_points", 3),
+                )
+                chunk["summary"], chunk["key_points"] = cr["summary"], cr["key_points"]
+            else:
+                chunk["summary"], chunk["key_points"] = "", []
+
     # ---- Build outputs ----
     out_cfg = cfg["output"]
     results = {"project_dir": project_dir, "kept_frames": kept_frames,
@@ -144,6 +179,12 @@ def process_one_video(video_path: Path, cfg: dict, base_out: Path, logger) -> di
             build_audio_document(
                 segments=merged_segments, video_title=video_title, output_path=docx_path,
                 summary=summary, key_points=key_points,
+            )
+        elif chunks is not None:
+            build_chunked_document(
+                chunks=chunks, video_title=video_title, output_path=docx_path,
+                image_width_inches=out_cfg["image_width_inches"],
+                overall_summary=summary, overall_key_points=key_points,
             )
         else:
             build_document(
@@ -159,6 +200,11 @@ def process_one_video(video_path: Path, cfg: dict, base_out: Path, logger) -> di
             build_audio_pptx(
                 segments=merged_segments, video_title=video_title, output_path=pptx_path,
                 summary=summary, key_points=key_points,
+            )
+        elif chunks is not None:
+            build_chunked_pptx(
+                chunks=chunks, video_title=video_title, output_path=pptx_path,
+                overall_summary=summary, overall_key_points=key_points,
             )
         else:
             build_pptx(

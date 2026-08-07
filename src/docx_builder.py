@@ -9,12 +9,43 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from docx import Document
-from docx.shared import Inches, Pt
+from docx.opc.constants import RELATIONSHIP_TYPE
+from docx.oxml.ns import qn
+from docx.oxml.shared import OxmlElement
+from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 from .utils import hhmmss_to_seconds, seconds_to_hhmmss
 
 logger = logging.getLogger("video2doc.docx_builder")
+
+
+def _add_hyperlink(paragraph, text: str, target_path: str):
+    """
+    python-docx has no built-in hyperlink API -- this adds a relative-path
+    hyperlink run (relative to the .docx file's own location) so clicking
+    "🔊 Play audio note" in Word opens the clip alongside it, as long as the
+    audio_notes/ folder travels with the document.
+    """
+    part = paragraph.part
+    r_id = part.relate_to(target_path, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    run = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "2E6B5E")
+    rPr.append(color)
+    underline = OxmlElement("w:u")
+    underline.set(qn("w:val"), "single")
+    rPr.append(underline)
+    run.append(rPr)
+    t = OxmlElement("w:t")
+    t.text = text
+    run.append(t)
+    hyperlink.append(run)
+    paragraph._p.append(hyperlink)
 
 
 def _frame_timestamp_seconds(frame_path: Path) -> float:
@@ -158,4 +189,82 @@ def build_document(frame_paths: List[Path], segments: List[Dict], video_title: s
     output_path.parent.mkdir(parents=True, exist_ok=True)
     doc.save(str(output_path))
     logger.info(f"Saved Word document: {output_path}")
+    return output_path
+
+
+def build_chunked_document(chunks: List[Dict], video_title: str, output_path: Path,
+                            image_width_inches: float = 5.5, overall_summary: str = "",
+                            overall_key_points: Optional[List[str]] = None) -> Path:
+    """
+    Builds the "4-part" report: for each semantic chunk --
+      1. representative image(s)
+      2. a clickable link to that chunk's audio note clip (if one was generated)
+      3. the chunk's transcript
+      4. the chunk's own mini-summary + key point(s)
+
+    Each item in `chunks` (see semantic_chunker.compute_chunks) is expected to
+    also carry, once processed: "images" (List[Path]), "audio_clip" (Path or
+    None, relative to output_path's folder), "summary" (str), "key_points" (List[str]).
+    """
+    from .utils import seconds_to_hhmmss as _ts
+
+    doc = Document()
+    title = doc.add_heading(video_title, level=0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    subtitle = doc.add_paragraph(f"Auto-generated report  •  {len(chunks)} sections")
+    subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
+
+    if overall_summary:
+        doc.add_heading("Overall Summary", level=1)
+        doc.add_paragraph(overall_summary)
+    if overall_key_points:
+        doc.add_heading("Overall Key Points", level=1)
+        for kp in overall_key_points:
+            doc.add_paragraph(kp, style="List Bullet")
+
+    doc.add_page_break()
+
+    for i, chunk in enumerate(chunks, 1):
+        doc.add_heading(f"Section {i}  ·  [{_ts(chunk['start'])} – {_ts(chunk['end'])}]", level=2)
+
+        # 1. Image(s)
+        for img in chunk.get("images", []):
+            try:
+                doc.add_picture(str(img), width=Inches(image_width_inches))
+            except Exception as e:
+                logger.warning(f"Could not insert image {img}: {e}")
+
+        # 2. Audio note link
+        audio_clip = chunk.get("audio_clip")
+        if audio_clip:
+            p = doc.add_paragraph()
+            rel_path = f"audio_notes/{Path(audio_clip).name}"
+            _add_hyperlink(p, f"🔊 Play audio note ({Path(audio_clip).name})", rel_path)
+            p.paragraph_format.space_after = Pt(6)
+
+        # 3. Transcript
+        transcript_text = chunk.get("transcript_text", "")
+        if transcript_text:
+            p = doc.add_paragraph(transcript_text)
+            p.paragraph_format.space_after = Pt(8)
+        else:
+            doc.add_paragraph("(no speech detected in this section)").paragraph_format.space_after = Pt(8)
+
+        # 4. Mini-summary + key point(s)
+        if chunk.get("summary"):
+            p = doc.add_paragraph()
+            run = p.add_run("Summary: ")
+            run.bold = True
+            run.font.color.rgb = RGBColor(0x2E, 0x6B, 0x5E)
+            p.add_run(chunk["summary"])
+            p.paragraph_format.space_after = Pt(4)
+        for kp in chunk.get("key_points", []):
+            doc.add_paragraph(kp, style="List Bullet")
+
+        if i < len(chunks):
+            doc.add_paragraph("").paragraph_format.space_after = Pt(4)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(str(output_path))
+    logger.info(f"Saved chunked Word document: {output_path}")
     return output_path
