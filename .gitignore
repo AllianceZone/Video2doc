@@ -4,3 +4,4 @@ __pycache__/
 output/
 .env
 *.egg-info/
+_ui_uploads/
