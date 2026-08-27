@@ -55,8 +55,18 @@ def _frame_timestamp_seconds(frame_path: Path) -> float:
 
 
 def _segments_between(segments: List[Dict], start: float, end: float) -> str:
-    texts = [seg["text"] for seg in segments if start <= seg["start"] < end]
-    return " ".join(texts).strip()
+    """Transcript spoken in [start, end).
+
+    Segments are attributed to the interval their start falls in; an interval
+    that no segment starts in falls back to any segment overlapping it, so a
+    long sentence that merely spans the interval isn't dropped (which would
+    render as "(no speech detected in this interval)").
+    """
+    owned = [seg["text"] for seg in segments if start <= seg["start"] < end]
+    if not owned:
+        owned = [seg["text"] for seg in segments
+                 if seg["start"] < end and seg.get("end", seg["start"]) > start]
+    return " ".join(owned).strip()
 
 
 def compute_frame_text_map(frame_paths: List[Path], segments: List[Dict]) -> Dict[str, str]:

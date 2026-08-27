@@ -25,7 +25,20 @@ def _frame_start(frame_path: Path) -> float:
 
 
 def _segments_between(segments: List[Dict], start: float, end: float) -> List[Dict]:
-    return [seg for seg in segments if start <= seg["start"] < end]
+    """Transcript segments belonging to the time window [start, end).
+
+    A segment is "owned" by the window its start falls in, so each sentence is
+    attributed to exactly one section in the normal case. But a single Whisper /
+    merged segment routinely runs 30-60s while frames -- and therefore section
+    boundaries -- change every few seconds; a window that no segment *starts* in
+    would otherwise render as "(no speech detected in this section)" even though
+    someone is still talking over it, so it falls back to any overlapping segment.
+    """
+    owned = [seg for seg in segments if start <= seg["start"] < end]
+    if owned:
+        return owned
+    return [seg for seg in segments
+            if seg["start"] < end and seg.get("end", seg["start"]) > start]
 
 
 def compute_sections(frame_paths: List[Path], segments: List[Dict],
@@ -117,7 +130,16 @@ def group_sections_for_summary(sections: List[Dict], group_size: int = 6,
 
     result = []
     for g in groups:
-        segments = [seg for sec in g for seg in sec["segments"]]
+        # A segment that spans a section boundary is carried by both sections
+        # (see _segments_between); dedupe so summarization doesn't see it twice.
+        seen = set()
+        segments = []
+        for sec in g:
+            for seg in sec["segments"]:
+                key = (seg["start"], seg["end"], seg["text"])
+                if key not in seen:
+                    seen.add(key)
+                    segments.append(seg)
         result.append({"start": g[0]["start"], "end": g[-1]["end"], "sections": g, "segments": segments})
     return result
 

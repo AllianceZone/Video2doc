@@ -25,6 +25,25 @@ def _frame_start(frame_path: Path) -> float:
     return hhmmss_to_seconds(frame_path.stem.replace("frame_", ""))
 
 
+def _segments_in_window(segments: List[Dict], start: float, end: float) -> List[Dict]:
+    """Transcript segments belonging to the time window [start, end).
+
+    A segment is "owned" by the window its *start* falls in, so each sentence is
+    attributed to exactly one chunk in the normal case. But a single transcript
+    segment can be long enough to span several chunks (Whisper/merged sentences
+    routinely run 30-60s while frames -- and therefore chunk boundaries -- change
+    every few seconds). Windows that no segment *starts* in would otherwise come
+    out empty and render as "(no speech detected in this section)" even though
+    someone is clearly still talking over them, so those windows fall back to any
+    segment that merely overlaps them.
+    """
+    owned = [s for s in segments if start <= s["start"] < end]
+    if owned:
+        return owned
+    return [s for s in segments
+            if s["start"] < end and s.get("end", s["start"]) > start]
+
+
 def compute_chunks(frame_paths: List[Path], segments: List[Dict],
                     similarity_threshold: float = 0.15, max_chunk_seconds: float = 60.0,
                     max_frames_per_chunk: int = 4) -> List[Dict]:
@@ -63,7 +82,7 @@ def compute_chunks(frame_paths: List[Path], segments: List[Dict],
         end = (
             _frame_start(chunks[i + 1][0]) if i + 1 < len(chunks) else start + 3600
         )
-        chunk_segments = [seg for seg in segments if start <= seg["start"] < end]
+        chunk_segments = _segments_in_window(segments, start, end)
         result.append({"start": start, "end": end, "frames": chunk_frames, "segments": chunk_segments})
 
     logger.info(f"Grouped {len(frame_paths)} frames into {len(result)} semantic chunks "
@@ -104,7 +123,16 @@ def group_chunks_for_summary(chunks: List[Dict], group_size: int = 6,
     for g in groups:
         start = g[0]["start"]
         end = g[-1]["end"]
-        segments = [seg for chunk in g for seg in chunk["segments"]]
+        # A segment that spans a chunk boundary is carried by both chunks (see
+        # _segments_in_window); dedupe so summarization doesn't see it twice.
+        seen = set()
+        segments = []
+        for chunk in g:
+            for seg in chunk["segments"]:
+                key = (seg["start"], seg["end"], seg["text"])
+                if key not in seen:
+                    seen.add(key)
+                    segments.append(seg)
         result.append({"start": start, "end": end, "chunks": g, "segments": segments})
 
     logger.info(f"Grouped {len(chunks)} chunks into {len(result)} summary groups "

@@ -170,6 +170,11 @@ report format. What it does:
   hyperlink (keep the `audio_notes/` folder next to the `.docx` for it to
   resolve); in the PowerPoint deck it's embedded as a playable click-to-play
   icon directly on the slide.
+- **Each section's transcript is the speech in its time window.** A sentence is
+  attributed to the section its start falls in. A section that no sentence
+  *starts* in — common when one long sentence spans several rapidly-changing
+  frames — still shows any sentence that overlaps its window, so a section with
+  audible speech is never labelled "(no speech detected in this section)".
 - **Summaries are generated one level up from sections, not per-section.**
   Summarizing a single tiny 2-4-sentence section has nothing to compress --
   it just restates itself. Instead, several consecutive sections (`summary_
